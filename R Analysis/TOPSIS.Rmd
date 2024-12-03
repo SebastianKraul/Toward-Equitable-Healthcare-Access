@@ -1,0 +1,208 @@
+---
+title: "TOPSIS"
+output: html
+---
+
+```{r setup, include=FALSE}
+options(scipen=999)
+options(digits=3)
+options(knitr.purl.inline = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+
+```{r, echo = T, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(plotly)
+```
+
+# Load data
+```{r, echo = T, warning=FALSE, message=FALSE}
+nInscope <- 20
+drg_master <- read_excel("OptModel/CleanInput/weight.xlsx")
+optimalityGap <- read_excel("OptModel/Output/Revenue.xlsx")
+pathOutput <- paste0("OptModel/Output/",nInscope)
+discharge <- read_excel(paste0("OptModel/CleanInput/",nInscope,"/discharge_",nInscope,".xlsx"))
+listFile <- list.files(pathOutput)
+
+output_list <- tibble()
+
+for (i in listFile){
+  tempPath <- paste0(pathOutput,"/",i)
+  temp <- read_excel(tempPath)
+  output_list <- bind_rows(output_list,temp)
+}
+
+
+list_scenario <- optimalityGap %>% distinct(Threshold_Within, Threshold_Among) %>% mutate(Dummy = 1) %>% 
+  rename(Threshold_InGroup=Threshold_Within)
+
+list_region <- output_list %>% distinct(Region) %>% mutate(Dummy = 1)
+list_DRG <- discharge %>% distinct(DRGCode) %>% mutate(Dummy = 1) %>% 
+  rename(DRG=DRGCode)
+
+output_list_full <- list_scenario %>% full_join(list_region) %>% full_join(list_DRG) %>% 
+  full_join(output_list) %>% 
+  mutate(ProposedVolume = ifelse(is.na(ProposedVolume),0, ProposedVolume))
+
+
+#Remove Big Optimality Gap 
+optimalityGap <- optimalityGap %>% filter(N_InScope == nInscope)
+
+output_list_rm <- output_list_full %>% left_join(optimalityGap %>%  select(Threshold_Within, Threshold_Among, OptimalityGap), by = c("Threshold_InGroup"="Threshold_Within",
+                                                                  "Threshold_Among"="Threshold_Among")) %>% 
+  filter(OptimalityGap <= 0.05) %>% 
+  select(-OptimalityGap)
+```
+
+```{r, echo = T, warning=FALSE, message=FALSE}
+list_scenario <- output_list_rm %>% distinct()
+
+
+output_list_cleaned <- output_list_rm %>% 
+  left_join(drg_master %>% select(DRGCode, Revenue), by = c("DRG"="DRGCode")) %>% 
+  mutate(RevenueDRG = Revenue*ProposedVolume) %>% 
+  group_by(Threshold_InGroup, Threshold_Among, Region) %>% 
+  summarise(Revenue = sum(RevenueDRG),
+            PatientVolume = sum(ProposedVolume)) %>% 
+  ungroup(Threshold_InGroup, ) 
+
+
+wnormalized_matrix <- output_list_cleaned %>% 
+  group_by(Region) %>% 
+  mutate(Max_Revenue = max(Revenue),
+         Max_PatientVolume = max(PatientVolume)) %>% 
+  ungroup() %>% 
+  mutate(wNormThresholdInGroup = Threshold_InGroup*0.15,
+         wNormThresholdAmong= Threshold_Among*0.15,
+         wNormRevenue = Revenue/Max_Revenue*0.4,
+         wNormPatientVolume = PatientVolume/Max_PatientVolume*0.3) %>% 
+  select(-Max_Revenue, -Max_PatientVolume)
+
+finalDecision <- wnormalized_matrix %>% 
+  group_by(Region) %>% 
+  mutate(PIS_ThresholdInGroup = min(wNormThresholdInGroup),
+         PIS_ThresholdAmong = min(wNormThresholdAmong),
+         PIS_Revenue = max(wNormRevenue),
+         PIS_PatientVolume = max(wNormPatientVolume),
+         NIS_ThresholdInGroup = max(wNormThresholdInGroup),
+         NIS_ThresholdAmong = max(wNormThresholdAmong),
+         NIS_Revenue = min(wNormRevenue),
+         NIS_PatientVolume = min(wNormPatientVolume)) %>% 
+  ungroup() %>% 
+  mutate(S_Plus = sqrt((wNormThresholdInGroup-PIS_ThresholdInGroup)^2 + (wNormThresholdAmong-PIS_ThresholdAmong)^2 +
+                         (wNormRevenue-PIS_Revenue)^2 + (wNormPatientVolume-PIS_PatientVolume)^2),
+         S_Minus = sqrt((wNormThresholdInGroup-NIS_ThresholdInGroup)^2 + (wNormThresholdAmong-NIS_ThresholdAmong)^2 +
+                         (wNormRevenue-NIS_Revenue)^2 + (wNormPatientVolume-NIS_PatientVolume)^2),
+         RC = S_Minus/(S_Plus + S_Minus)) %>% 
+  group_by(Region) %>% 
+  arrange(desc(RC)) %>% 
+  ungroup() %>% 
+  group_by(Region) %>% 
+  mutate(Rank = row_number()) %>% 
+  ungroup() %>% 
+  select(Region,Threshold_InGroup,Threshold_Among, Revenue, PatientVolume, RC, Rank) %>% 
+  mutate(Code = paste0(Region,"_",Threshold_InGroup,"_",Threshold_Among))
+
+
+initialBestSolution <- finalDecision %>% 
+  filter(Rank==1)
+```
+
+
+# Sensitivity Analysis
+```{r, echo = T, warning=FALSE, message=FALSE}
+
+
+w_Threshold <- seq(0.1, 1, by = 0.05) %>% 
+  as.tibble() %>% 
+  rename(w_ThresholdAmong = value) %>% 
+  mutate(w_ThresholdInGroup = w_ThresholdAmong) %>% 
+  mutate(Dummy = 1)
+
+w_Revenue  <- seq(0.2, 1, by = 0.05) %>% 
+  as.tibble() %>% 
+  rename(w_Revenue = value) %>% 
+  mutate(Dummy = 1)
+
+w_PatientVolume  <- seq(0.2, 1, by = 0.05) %>% 
+  as.tibble() %>% 
+  rename(w_PatientVolume = value) %>% 
+  mutate(Dummy = 1)
+
+
+weight <- w_Threshold %>% full_join(w_Revenue) %>% full_join(w_PatientVolume) %>% 
+  mutate(sum = w_ThresholdAmong + w_ThresholdInGroup + w_Revenue + w_PatientVolume) %>% 
+  filter(sum == 1) %>% 
+  select(-sum)
+
+sen_wnormalized_matrix <- output_list_cleaned %>% 
+  mutate(Dummy = 1) %>% 
+  full_join(weight) %>% 
+  group_by(Region) %>% 
+  mutate(Max_Revenue = max(Revenue),
+         Max_PatientVolume = max(PatientVolume)) %>% 
+  ungroup() %>% 
+  mutate(wNormThresholdInGroup = Threshold_InGroup*w_ThresholdInGroup,
+         wNormThresholdAmong= Threshold_Among*w_ThresholdAmong,
+         wNormRevenue = Revenue/Max_Revenue*w_Revenue,
+         wNormPatientVolume = PatientVolume/Max_PatientVolume*w_PatientVolume) %>% 
+  select(-Max_Revenue, -Max_PatientVolume)
+
+
+n_option <- sen_wnormalized_matrix %>% 
+  group_by(Region,w_ThresholdInGroup, w_ThresholdAmong, w_Revenue, w_PatientVolume) %>% 
+  summarise(n_options = n())
+
+sen_finalDecision <- sen_wnormalized_matrix %>% 
+  group_by(Region,w_ThresholdInGroup, w_ThresholdAmong, w_Revenue, w_PatientVolume) %>% 
+  mutate(PIS_ThresholdInGroup = min(wNormThresholdInGroup),
+         PIS_ThresholdAmong = min(wNormThresholdAmong),
+         PIS_Revenue = max(wNormRevenue),
+         PIS_PatientVolume = max(wNormPatientVolume),
+         NIS_ThresholdInGroup = max(wNormThresholdInGroup),
+         NIS_ThresholdAmong = max(wNormThresholdAmong),
+         NIS_Revenue = min(wNormRevenue),
+         NIS_PatientVolume = min(wNormPatientVolume)) %>% 
+  ungroup() %>% 
+  mutate(S_Plus = sqrt((wNormThresholdInGroup-PIS_ThresholdInGroup)^2 + (wNormThresholdAmong-PIS_ThresholdAmong)^2 +
+                         (wNormRevenue-PIS_Revenue)^2 + (wNormPatientVolume-PIS_PatientVolume)^2),
+         S_Minus = sqrt((wNormThresholdInGroup-NIS_ThresholdInGroup)^2 + (wNormThresholdAmong-NIS_ThresholdAmong)^2 +
+                         (wNormRevenue-NIS_Revenue)^2 + (wNormPatientVolume-NIS_PatientVolume)^2),
+         RC = S_Minus/(S_Plus + S_Minus)) %>% 
+  group_by(Region,w_ThresholdInGroup, w_ThresholdAmong, w_Revenue, w_PatientVolume) %>% 
+  arrange(desc(RC)) %>% 
+  ungroup() %>% 
+  group_by(Region,w_ThresholdInGroup, w_ThresholdAmong, w_Revenue, w_PatientVolume) %>% 
+  mutate(Rank = row_number()) %>% 
+  ungroup() %>% 
+  select(Region,w_ThresholdInGroup, w_ThresholdAmong, w_Revenue, w_PatientVolume, Threshold_InGroup,Threshold_Among, Revenue, PatientVolume, RC, Rank) %>% 
+  mutate(Code = paste0(Region,"_",Threshold_InGroup,"_",Threshold_Among)) %>% 
+  filter(Code %in% initialBestSolution$Code) %>% 
+  left_join(n_option) %>% 
+  mutate(Percentile = (n_options-Rank+1)/n_options*100)
+
+
+quality_Revenue <- sen_finalDecision %>% 
+  group_by(w_Revenue) %>% 
+  summarise(Percentile =mean(Percentile))
+
+quality_Among <- sen_finalDecision %>% 
+  group_by(w_ThresholdAmong) %>% 
+  summarise(Percentile =mean(Percentile))
+
+quality_Within <- sen_finalDecision %>% 
+  group_by(w_ThresholdInGroup) %>% 
+  summarise(Percentile =mean(Percentile))
+
+
+quality_Patient <- sen_finalDecision %>% 
+  group_by(w_PatientVolume) %>% 
+  summarise(Percentile =mean(Percentile))
+
+
+
+```

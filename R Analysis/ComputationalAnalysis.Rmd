@@ -1,0 +1,282 @@
+---
+title: "Computational Analysis"
+author: "Huy Le"
+output: 
+  html_document:
+    css: rany_style.css
+    df_print: paged
+    theme: default
+    toc: yes
+    toc_float:
+      collapsed: true
+    number_sections: true
+
+knit: (function(inputFile, encoding) {
+      out_dir <- '..';
+      rmarkdown::render("ComputationalAnalysis.Rmd",
+                        encoding=encoding,
+                        output_file=file.path(dirname(inputFile), out_dir, 'ComputationalAnalysis.html')) })
+---
+
+<b> Definition: </b><br> - <b> Set: </b> Set of runs that include a predetermined number of in-scope regions. Each set will consider one more region compared to its preceding set.<br> - <b> Run: </b> A solving attempt with predetermined values for "Target Inequity Among Clusters" and "Target Inequity Within Cluster".<br> - <b> Time Limit: </b> Time limit for the solver is set at 1800 seconds.<br>
+
+```{r setup, echo = F, include=FALSE}
+options(scipen=999)
+options(digits=2)
+options(knitr.purl.inline = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r, echo = F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(plotly)
+library(DT)
+library(highcharter)
+
+
+```
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE}
+displaytable <- function(data, rownames = FALSE, filter = 'none') {
+  datatable(
+    as.data.frame(data),
+    rownames = rownames,
+    extensions = list(Buttons = NULL),
+    filter = filter,
+    options = list(
+      scrollY = TRUE,
+      scrollX = TRUE,
+      initComplete = JS("function(settings, json) {",
+                        "$(this.api().table().header()).css({'background-color': '#013e77', 'color': '#fff'});",
+                        "}"),
+      dom = "Blfrtip",
+      buttons = list(
+        list(
+          extend = "collection",
+          buttons = c("csv", "excel", "pdf"),
+          text = "Download"
+        ),
+        I("colvis")
+      )
+    )
+  )
+}
+```
+
+```{r, echo = F, warning=FALSE, message=FALSE}
+# Load data
+output <- read_excel("OptModel/Output/Revenue.xlsx") %>% 
+  select(N_InScope, Threshold_Within, Threshold_Among, SolverTime, TerminationCondition, OptimalityGap) %>% 
+  filter(as.numeric(N_InScope) <= 20) %>% 
+  mutate(SolverTime = ifelse(SolverTime > 1800, 1800, SolverTime)) %>% 
+  mutate(SolverTime = round(SolverTime,3),
+         OptimalityGap = round(OptimalityGap,3))
+
+setList <- unique(output$N_InScope)
+
+output_clean <- output %>% mutate(N_InScope = factor(N_InScope, levels = setList)) %>% 
+  arrange(N_InScope, Threshold_Within, Threshold_Among)
+```
+
+# Executive Summary
+```{r, echo = F, warning=FALSE, message=FALSE}
+n_set <- output_clean %>%
+  summarise(`Number of Sets` = n_distinct(N_InScope))
+
+n_run_per_set <- output_clean %>%
+  summarise(`Number of Runs per Set` = n_distinct(Threshold_Within, Threshold_Among))
+
+percentage_run_belowlimit <- output_clean %>% 
+  group_by(N_InScope, TerminationCondition) %>% 
+  summarise(`Number of Runs` = n()) %>% 
+  ungroup() %>% 
+  filter(TerminationCondition == "optimal") %>% 
+  summarise(`Average Number of Below-Time-Limit Runs` = round(mean(`Number of Runs`),0))
+
+time_per_set <- output_clean %>% group_by(N_InScope) %>% 
+  summarise(TotalSolverTime = sum(SolverTime)) %>% 
+  ungroup() %>% 
+  summarise(`Average Solver Time per Set (seconds)` = round(mean(TotalSolverTime),0))
+
+time_per_run <- output_clean %>% 
+  filter(SolverTime < 1800) %>% 
+  summarise(`Solver Time per Run - Excl Exceed-time-limit runs (seconds)` = round(mean(SolverTime),0))
+
+
+kpis <- bind_cols(n_set, n_run_per_set, percentage_run_belowlimit, time_per_set, time_per_run) %>% 
+  gather(key = "KPI", value = "Value")
+
+kpis %>% displaytable()
+
+```
+
+
+
+```{r, echo = F, warning=FALSE, message=FALSE,out.width="100%"}
+
+# n_runs_by_terminationcondition <- output_clean %>% 
+#   group_by(N_InScope, TerminationCondition) %>% 
+#   summarise(`Number of Runs` = n()) %>% 
+#   ungroup()
+#   
+# 
+# hchart(n_runs_by_terminationcondition, "column", hcaes(x =  "N_InScope", y = `Number of Runs`, group = "TerminationCondition")) %>%
+#   hc_xAxis(title = list(text = "Number of In-scope Regions")) %>%
+#   hc_yAxis(title = list(text = "Number of Runs"), max = 121) %>%
+#   hc_title(text = "Number of Runs by Termination Condition and Number of In-scope Regions",
+#            style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+#   hc_chart(zoomType = "xy") %>%
+#   hc_exporting(enabled = TRUE) %>% 
+#   hc_colors(c("#00b4ae", "#013e77")) %>% 
+#   hc_tooltip(crosshairs = TRUE, 
+#     shared = TRUE, headerFormat = str_c("</b>{point.key}</b><br/>")) %>% 
+#   hc_plotOptions(column = list(stacking = "normal"))
+
+```
+
+# Solver Time Analysis
+
+## By Number of In-scope Regions
+```{r, echo = F, warning=FALSE, message=FALSE,out.width="100%"}
+
+
+solvertime_by_terminationcondition <- output_clean %>% 
+  group_by(N_InScope, TerminationCondition) %>% 
+  summarise(`Solver Time` = round(sum(SolverTime),0)) %>% 
+  ungroup()
+  
+hchart(solvertime_by_terminationcondition, "area", hcaes(x = N_InScope, y = `Solver Time`, group = TerminationCondition), stacking = "normal") %>%
+  hc_xAxis(title = list(text = "Number of In-scope Regions")) %>%
+  hc_yAxis(title = list(text = "Solver Time (seconds)")) %>%
+  hc_title(text = "Solver Time by Termination Condition and Number of In-scope Regions",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_chart(zoomType = "xy") %>%
+  hc_exporting(enabled = TRUE) %>% 
+  hc_colors(c("#00b4ae", "#013e77")) %>% 
+  hc_tooltip(crosshairs = TRUE, 
+             shared = TRUE, 
+             headerFormat = "<b>Total Solver Time:</b> {point.total:,.0f} seconds<br/>",
+              pointFormat = '<span style="color:{point.color}">\u25CF</span> <b>{series.name}:</b> {point.y:,.0f} ({point.percentage:,.3f} %) <br>')
+
+dist <- ggplot(output_clean, aes(x = factor(N_InScope), y = SolverTime)) +
+  geom_violin(color = "#013e77")+
+  labs(title = "Solver Time per Run by Number of In-scope Regions (Excl Exceed-time-limit runs)",
+       x = "Number of In-scope Regions",
+       y = "Solver Time (seconds)") +
+  ylim(0, 200)+
+  theme(plot.title = element_text(face = "bold"))+
+  theme_minimal()
+
+dist%>% ggplotly() %>% 
+  layout(font = list(family = "Arial")) %>% 
+  layout(
+    yaxis = list(
+      tickvals = c(0, 25, 50, 75, 100, 125,150,175,200),  
+      ticktext = c("0", "25", "50", "75", "100", "125", "150", "175", "200")
+    )
+  )
+
+average_solvertime_perrun <- output_clean %>% 
+  filter(TerminationCondition == "optimal") %>% 
+  group_by(N_InScope) %>% 
+  summarise(`Average Solver Time per Run` = mean(SolverTime))
+  
+hchart(average_solvertime_perrun, "column",
+       hcaes(x = factor(N_InScope), y = `Average Solver Time per Run`)) %>%
+  hc_title(text = "Average Solver Time per Run (Excl Exceed-time-limit runs)",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Number of In-scope Regions")) %>%
+  hc_yAxis(title = list(text = "Average Solver Time (seconds)")) %>%
+  hc_colors(c("#013e77")) %>%
+    hc_tooltip(crosshairs = TRUE,
+    shared = TRUE, headerFormat = str_c("</b>{point.key}</b><br/>"),
+    pointFormat = '<span style="color:{point.color}">\u25CF</span> <b>Average solver time:</b> {point.y:,.0f}  seconds<br>')
+```
+
+## By Target Inequity
+
+```{r echo=F, message=FALSE, warning=FALSE, out.width="100%"}
+
+solvertime_targetInequity <- output_clean %>% 
+  group_by(Threshold_Among, Threshold_Within) %>% 
+  summarise(`Average Solver Time` = round(mean(SolverTime),3)) %>% 
+  ungroup() %>% 
+  mutate(Threshold_Among = as.character(Threshold_Among),
+         Threshold_Within = as.character(Threshold_Within))
+
+adjusted_palette <- colorRampPalette(c("#00b4ae", "#013e77"))(100)
+
+
+
+hchart(solvertime_targetInequity, "heatmap", 
+       hcaes(x = Threshold_Among, y = Threshold_Within, value = `Average Solver Time`)) %>%
+  hc_title(text = "Average Solver Time by Target Inequity",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Among Clusters")) %>%
+  hc_yAxis(title = list(text = "Target Inequity Within Cluster")) %>% 
+  hc_colorAxis(stops = color_stops(n = 100, colors = adjusted_palette)) %>% 
+  hc_legend(title = list(text = "Solver Time")) %>% 
+  hc_tooltip(
+    headerFormat = "",
+    pointFormat = "Solver Time: {point.value}"
+  )
+
+hchart(solvertime_targetInequity, "heatmap", 
+       hcaes(x = Threshold_Among, y = Threshold_Within, value = round(log(`Average Solver Time`),3))) %>%
+  hc_title(text = "Average Solver Time by Target Inequity",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Among Clusters")) %>%
+  hc_yAxis(title = list(text = "Target Inequity Within Cluster")) %>% 
+  hc_colorAxis(stops = color_stops(n = 100, colors = adjusted_palette)) %>% 
+  hc_legend(title = list(text = "ln(Solver Time)")) %>% 
+  hc_tooltip(
+    headerFormat = "",
+    pointFormat = "ln(Solver Time): {point.value}"
+  )
+
+
+```
+
+# Optimality Gap Analysis
+
+```{r echo=F, message=FALSE, warning=FALSE, out.width="100%"}
+
+optimality_targetInequity <- output_clean %>% 
+  group_by(Threshold_Among, Threshold_Within) %>% 
+  summarise(`Average Optimality Gap` = round(mean(OptimalityGap))) %>% 
+  ungroup() %>% 
+  mutate(Threshold_Among = as.character(Threshold_Among),
+         Threshold_Within = as.character(Threshold_Within))
+
+adjusted_palette <- colorRampPalette(c("#00b4ae", "#013e77"))(100)
+
+hchart(optimality_targetInequity, "heatmap", 
+       hcaes(x = Threshold_Among, y = Threshold_Within, value = `Average Optimality Gap`)) %>%
+  hc_title(text = "Average Optimality Gap by Target Inequity",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Among Clusters")) %>%
+  hc_yAxis(title = list(text = "Target Inequity Within Cluster")) %>% 
+  hc_colorAxis(stops = color_stops(n = 100, colors = adjusted_palette)) %>% 
+  hc_legend(title = list(text = "Optimality Gap")) %>% 
+  hc_tooltip(
+    headerFormat = "",
+    pointFormat = "Average Optimality Gap: {point.value}"
+  )
+
+
+```
+
+# Appendix
+
+```{r echo=F, message=FALSE, warning=FALSE, out.width="100%"}
+output_clean %>% 
+  rename(`Number of In-scope Regions` = N_InScope,
+         `Target Inequity Within Cluster` = Threshold_Within,
+         `Target Inequity Among Cluster` = Threshold_Among) %>% 
+  displaytable()
+
+
+```

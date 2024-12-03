@@ -1,0 +1,488 @@
+---
+title: "Result Analysis"
+author: "Huy Le"
+output: 
+  html_document:
+    css: rany_style.css
+    df_print: paged
+    theme: default
+    toc: yes
+    toc_float:
+      collapsed: true
+    number_sections: true
+
+knit: (function(inputFile, encoding) {
+      out_dir <- '..';
+      rmarkdown::render("TradeOff.Rmd",
+                        encoding=encoding,
+                        output_file=file.path(dirname(inputFile), out_dir, 'ResultAnalysis.html')) })
+---
+
+```{r setup, echo = F, include=FALSE}
+options(scipen=999)
+options(digits=2)
+options(knitr.purl.inline = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+```{r, echo = F, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(plotly)
+library(DT)
+library(highcharter)
+library(ggplot2)
+
+
+
+```
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE}
+displaytable <- function(data, rownames = FALSE, filter = 'none') {
+  datatable(
+    as.data.frame(data),
+    rownames = rownames,
+    extensions = list(Buttons = NULL),
+    filter = filter,
+    options = list(
+      scrollY = TRUE,
+      scrollX = TRUE,
+      initComplete = JS("function(settings, json) {",
+                        "$(this.api().table().header()).css({'background-color': '#013e77', 'color': '#fff'});",
+                        "}"),
+      dom = "Blfrtip",
+      buttons = list(
+        list(
+          extend = "collection",
+          buttons = c("csv", "excel", "pdf"),
+          text = "Download"
+        ),
+        I("colvis")
+      )
+    )
+  )
+}
+```
+
+```{r, echo = F, warning=FALSE, message=FALSE}
+# Load data
+
+nInscope <- 20
+drg_master <- read_excel("OptModel/CleanInput/weight.xlsx")%>% 
+  mutate(ClusterId = paste("Cluster", ClusterId))
+optimalityGap <- read_excel("OptModel/Output/Revenue.xlsx")
+pathOutput <- paste0("OptModel/Output/",nInscope)
+discharge <- read_excel(paste0("OptModel/CleanInput/",nInscope,"/discharge_",nInscope,".xlsx"))
+listFile <- list.files(pathOutput)
+
+output_list <- tibble()
+
+for (i in listFile){
+  tempPath <- paste0(pathOutput,"/",i)
+  temp <- read_excel(tempPath)
+  output_list <- bind_rows(output_list,temp)
+}
+
+
+list_scenario <- optimalityGap %>% distinct(Threshold_Within, Threshold_Among) %>% mutate(Dummy = 1) %>% 
+  rename(Threshold_InGroup=Threshold_Within)
+
+list_region <- output_list %>% distinct(Region) %>% mutate(Dummy = 1)
+list_DRG <- discharge %>% distinct(DRGCode) %>% mutate(Dummy = 1) %>% 
+  rename(DRG=DRGCode)
+
+output_list_full <- list_scenario %>% full_join(list_region) %>% full_join(list_DRG) %>% 
+  full_join(output_list) %>% 
+  mutate(ProposedVolume = ifelse(is.na(ProposedVolume),0, ProposedVolume))
+
+
+#Remove Big Optimality Gap 
+optimalityGap <- optimalityGap %>% filter(N_InScope == nInscope)
+
+output_list_rm <- output_list_full %>% left_join(optimalityGap %>%  select(Threshold_Within, Threshold_Among, OptimalityGap), by = c("Threshold_InGroup"="Threshold_Within",
+                                                                  "Threshold_Among"="Threshold_Among")) %>% 
+  filter(OptimalityGap <= 0.05) %>% 
+  select(-OptimalityGap) %>% 
+  select(-Dummy)
+
+
+output_list_includeMaster <- output_list_rm %>% left_join(drg_master %>% select(DRGCode, Revenue, ClusterId, MeanLOS),
+                                                          by = c("DRG"="DRGCode")) %>% 
+  left_join(discharge, by = c("DRG"="DRGCode", "Region"="Region")) %>% 
+  mutate(RevenueByDRG = ProposedVolume*Revenue) %>% 
+  mutate(Threshold_InGroup = as.character(Threshold_InGroup),
+         Threshold_Among = as.character(Threshold_Among))
+  
+```
+
+# Executive Summary
+
+```{r, echo = F, warning=FALSE, message=FALSE}
+
+revenue_scenario <- output_list_includeMaster %>% 
+  group_by(Threshold_InGroup,Threshold_Among) %>% 
+  summarise(RevenueByScenario = sum(RevenueByDRG)/1000000) %>% 
+  ungroup()
+  
+adjusted_palette <- colorRampPalette(c("#00b4ae", "#013e77"))(100)
+
+hchart(revenue_scenario, "heatmap", 
+       hcaes(x = Threshold_Among, y = Threshold_InGroup, value = round(RevenueByScenario),3)) %>%
+  hc_title(text = "Total Revenue by Target Equity",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Among Clusters")) %>%
+  hc_yAxis(title = list(text = "Target Inequity Within Cluster")) %>% 
+  hc_colorAxis(stops = color_stops(n = 1000, colors = adjusted_palette)) %>% 
+  hc_legend(title = list(text = "Revenue")) %>% 
+  hc_tooltip(
+    headerFormat = "",
+    pointFormat = "Revenue (mil USD): {point.value}"
+  )
+
+```
+
+```{r, echo = F, warning=FALSE, message=FALSE}
+revenue_region_scenario <- output_list_includeMaster %>% 
+  group_by(Threshold_InGroup,Threshold_Among,Region) %>% 
+  summarise(RevenueByRegion = round(sum(RevenueByDRG)/1000000,3))
+  
+summary_region_scenario <- revenue_region_scenario%>% 
+  ungroup() %>% 
+  group_by(Region) %>% 
+  summarise(`Minimum Value (mil USD)` = min(RevenueByRegion),
+            `25th Revenue (mil USD)` = round(quantile(RevenueByRegion, 0.25),3),
+            `50th Revenue (mil USD)` = quantile(RevenueByRegion, 0.5),
+            `75th Revenue (mil USD)` = quantile(RevenueByRegion, 0.5),
+            `Maximum Value (mil USD)` = max(RevenueByRegion),
+            `Coefficient of Quartile Variation (%)` = round((`75th Revenue (mil USD)`-`25th Revenue (mil USD)`)/(`75th Revenue (mil USD)`+`25th Revenue (mil USD)`)*100,3)
+            ) %>% 
+  ungroup()
+
+
+summary_region_scenario %>% displaytable()
+
+```
+
+
+# Analysis Target Inequity Among Clusters
+## Revenue Change Analysis
+```{r, echo = F, warning=FALSE, message=FALSE}
+revenue_region_scenario_among_optimal <- revenue_region_scenario %>% 
+  ungroup() %>% 
+  filter(Threshold_InGroup != 0 & Threshold_Among == 1 ) %>% 
+  mutate(Dummy = 1) %>% 
+  select(-Threshold_Among) %>% 
+  rename(RevenueByRegion_optimal = RevenueByRegion)
+
+revenue_region_scenario_among_acc_drop <- revenue_region_scenario %>%
+  filter(Threshold_InGroup != 0 & Threshold_Among != 0 ) %>% 
+  mutate(Dummy = 1) %>% 
+  full_join(revenue_region_scenario_among_optimal) %>% 
+  mutate(AccumulatedRevenueDrop = (RevenueByRegion_optimal - RevenueByRegion)/RevenueByRegion_optimal*100) %>% 
+  mutate(AccumulatedRevenueDrop = ifelse(is.finite(AccumulatedRevenueDrop), AccumulatedRevenueDrop, 0)) %>% 
+  mutate(AccumulatedRevenueDrop = ifelse(AccumulatedRevenueDrop <0, 0, AccumulatedRevenueDrop))
+
+averagedrop_bychangeamong_region <- revenue_region_scenario_among_acc_drop %>% 
+  group_by(Region, Threshold_Among) %>% 
+  summarise(AverageRevenueDrop = mean(AccumulatedRevenueDrop)) %>% 
+  ungroup()
+
+averagedrop_bychangeamong <- revenue_region_scenario_among_acc_drop %>% 
+  group_by(Threshold_Among) %>% 
+  summarise(AverageRevenueDrop = mean(AccumulatedRevenueDrop)) %>% 
+  ungroup()
+
+hchart(averagedrop_bychangeamong, "line", 
+       hcaes(x = Threshold_Among, y = round(AverageRevenueDrop,3))) %>%
+  hc_title(text = "Accumulated Revenue Drop Rate by Target Inequity Among Clusters",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Among Clusters"), 
+           reversed = TRUE  ) %>%
+  hc_yAxis(title = list(text = "Accumulated Revenue Drop Rate (%)")) %>% 
+  hc_chart(zoomType = "xy") %>%
+  hc_exporting(enabled = TRUE) %>% 
+  hc_colors(c("#013e77")) %>% 
+  hc_tooltip(crosshairs = TRUE, 
+             shared = TRUE,
+             headerFormat = "",
+    pointFormat = "Revenue Drop: {point.y}%") 
+
+
+hchart(averagedrop_bychangeamong_region, "heatmap", 
+       hcaes(x = Threshold_Among, y = Region, value = round(AverageRevenueDrop,3))) %>%
+  hc_title(text = "Accumulated Revenue Drop Rate by Region",
+           style = list(fontWeight = "bold", fontFamily = "Arial")) %>%
+  hc_xAxis(
+    title = list(text = "Target Inequity Among Clusters"),
+    reversed = TRUE  
+  ) %>%
+  hc_yAxis(title = list(text = "Region")) %>% 
+  hc_colorAxis(stops = color_stops(n = 100, colors = adjusted_palette)) %>% 
+  hc_legend(title = list(text = "Accumulated Revenue Drop Rate (%)")) %>% 
+  hc_tooltip(
+    headerFormat = "",
+    pointFormat = "Revenue Drop: {point.value}%"
+  )
+
+```
+## Health Profile and Profitability Analysis
+```{r, echo = F, warning=FALSE, message=FALSE}
+## Revenue by Cluster 
+
+color_list <- c("#0474ed", "#08a29e", "#91f0fa", "#a2b458", "#a6cabd", "#326164")
+visualize_cluster <- ggplot(drg_master %>% 
+                              rename(Cluster = ClusterId,
+                                     `Revenue per patient (USD)` = Revenue,
+                                     `Length of Stay (days)` = MeanLOS), 
+                            aes(`Length of Stay (days)`, `Revenue per patient (USD)` , color = Cluster)) +
+    geom_point(alpha = 0.5)+
+    scale_color_manual(values = color_list) + 
+  ggtitle("DRGs Clustering Based on Revenue")
+
+
+visualize_cluster %>% ggplotly() %>% 
+  layout(font = list(family = "Arial"))
+
+cluster_RevenuePerDay <- drg_master %>% 
+  mutate(RevenuePerDay = Revenue/MeanLOS)
+
+dist_RevenuePerDay <- ggplot(cluster_RevenuePerDay, aes(x = ClusterId, y = RevenuePerDay)) +
+  geom_boxplot(color = "#013e77")+
+  labs(title = "Revenue Per Bed Day by Cluster",
+       x = "Cluster",
+       y = "Revenue per Bed Day (USD)") +
+  theme(plot.title = element_text(face = "bold"))+
+  theme_minimal()
+
+dist_RevenuePerDay %>% ggplotly()%>% 
+  layout(font = list(family = "Arial"))
+
+
+dist_Demand <- discharge %>%
+  left_join(drg_master) %>% 
+  mutate(ResourceConsumption = Discharge * MeanLOS) %>%
+  group_by(Region, ClusterId) %>%
+  summarise(`Demand in Bed Days` = sum(ResourceConsumption)) %>%
+  mutate(Region = factor(Region) %>% fct_reorder(ClusterId))
+
+hchart(dist_Demand, "column", 
+       hcaes(x = Region, y = `Demand in Bed Days`, group = ClusterId), 
+       stacking = "percent") %>% 
+  hc_colors(color_list) %>% 
+   hc_tooltip(crosshairs = TRUE, 
+             shared = TRUE,
+             headerFormat = "",
+              pointFormat = '<span style="color:{point.color}">\u25CF</span> <b>{series.name}:</b> {point.percentage:,.3f} % <br>') %>% 
+  hc_xAxis(title = list(text = "Region")) %>%
+  hc_yAxis(title = list(text = "Demand in Bed Days Contribution (%)")) %>%
+  hc_title(text = "Health Profile by Region",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_chart(zoomType = "xy") %>%
+  hc_exporting(enabled = TRUE)
+
+
+
+```
+
+## Treatment Opportunity Analysis
+```{r, echo = F, warning=FALSE, message=FALSE,out.width="100%"}
+
+## Average Treatment Opportunity by Cluster and Target Inequity
+
+treatment_opportunities_cluster <- output_list_includeMaster %>% 
+  filter(Threshold_InGroup != 0 & Threshold_Among != 0 ) %>% 
+  group_by(Threshold_InGroup, Threshold_Among, Region,ClusterId) %>% 
+  summarise(TotalProposedVolume = sum(ProposedVolume),
+            TotalDemand = sum(Discharge)) %>% 
+  mutate(TreatmentOpportunity = TotalProposedVolume/TotalDemand) %>% 
+  select(Threshold_InGroup, Threshold_Among, Region, ClusterId, TreatmentOpportunity, TotalDemand) %>% 
+  filter(TotalDemand > 0 )
+
+
+avg_treatment_opportunities_cluster <-  treatment_opportunities_cluster %>% 
+  group_by(Threshold_Among,ClusterId) %>%
+  summarise(AvgTreatmentOpportunity = mean(TreatmentOpportunity)) 
+  
+  
+hchart(avg_treatment_opportunities_cluster, "line", 
+       hcaes(x = Threshold_Among, y = round(AvgTreatmentOpportunity,3),
+             group = ClusterId)) %>%
+  hc_title(text = "Treatment Opportunity by Cluster",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Among Clusters"),
+           reversed = TRUE) %>%
+  hc_yAxis(title = list(text = "Average Treatment Opportunity"),
+           min = 0, max = 1) %>% 
+  hc_chart(zoomType = "xy") %>%
+  hc_colors(color_list) %>% 
+  hc_exporting(enabled = TRUE) %>% 
+  hc_tooltip(crosshairs = TRUE, 
+             shared = TRUE) 
+
+
+```
+
+# Analysis by Target Inequity Within Clusters 
+## Revenue Change Analysis
+```{r, echo = F, warning=FALSE, message=FALSE}
+
+revenue_region_scenario_within_optimal <- revenue_region_scenario %>% 
+  ungroup() %>% 
+  filter(Threshold_Among != 0 & Threshold_InGroup == 1 ) %>% 
+  mutate(Dummy = 1) %>% 
+  select(-Threshold_InGroup) %>% 
+  rename(RevenueByRegion_optimal = RevenueByRegion)
+
+revenue_region_scenario_within_acc_drop <- revenue_region_scenario %>%
+  filter(Threshold_InGroup != 0 & Threshold_Among != 0 ) %>% 
+  mutate(Dummy = 1) %>% 
+  full_join(revenue_region_scenario_within_optimal) %>% 
+  mutate(AccumulatedRevenueDrop = (RevenueByRegion_optimal - RevenueByRegion)/RevenueByRegion_optimal*100) %>% 
+  mutate(AccumulatedRevenueDrop = ifelse(is.finite(AccumulatedRevenueDrop), AccumulatedRevenueDrop, 0)) %>% 
+  mutate(AccumulatedRevenueDrop = ifelse(AccumulatedRevenueDrop <0, 0, AccumulatedRevenueDrop))
+
+averagedrop_bychangewithin_region <- revenue_region_scenario_within_acc_drop %>% 
+  group_by(Region, Threshold_InGroup) %>% 
+  summarise(AverageRevenueDrop = mean(AccumulatedRevenueDrop)) %>% 
+  ungroup()
+
+averagedrop_bychangewithin <- revenue_region_scenario_within_acc_drop %>% 
+  group_by(Threshold_InGroup) %>% 
+  summarise(AverageRevenueDrop = mean(AccumulatedRevenueDrop)) %>% 
+  ungroup()
+
+hchart(averagedrop_bychangewithin, "line", 
+       hcaes(x = Threshold_InGroup, y = round(AverageRevenueDrop,3))) %>%
+  hc_title(text = "Accumulated Revenue Drop Rate by Target Inequity Within Cluster",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Within Clusters"),
+           reversed = TRUE) %>%
+  hc_yAxis(title = list(text = "Accumulated Revenue Drop Rate (%)"),
+           min = 0, max = 3) %>% 
+  hc_chart(zoomType = "xy") %>%
+  hc_exporting(enabled = TRUE) %>% 
+  hc_colors(c("#013e77")) %>% 
+  hc_tooltip(crosshairs = TRUE, 
+             shared = TRUE,
+             headerFormat = "",
+    pointFormat = "Revenue Drop: {point.y}%") 
+
+
+hchart(averagedrop_bychangewithin_region, "heatmap", 
+       hcaes(x = Threshold_InGroup, y = Region, value = round(AverageRevenueDrop,3))) %>%
+  hc_title(text = "Accumulated Revenue Drop Rate by Region (%)",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Target Inequity Within Clusters"),
+           reversed = TRUE) %>%
+  hc_yAxis(title = list(text = "Region")) %>% 
+  hc_colorAxis(stops = color_stops(n = 10000, colors = adjusted_palette)) %>% 
+  hc_legend(title = list(text = "Accumulated Revenue Drop Rate (%)")) %>% 
+  hc_tooltip(
+    headerFormat = "",
+    pointFormat = "Revenue Drop: {point.value}%"
+  )
+```
+## Health Profile and Profitability Analysis
+```{r, echo = F, warning=FALSE, message=FALSE,out.width="100%"}
+library(stringi)
+drg_data <- drg_master %>% 
+  rename(`Average LOS` = MeanLOS,
+         `Cluster` = ClusterId) %>% 
+  mutate(Cluster = paste("",stri_sub(Cluster,-1,-1)))
+  
+
+fit <- lm(Revenue ~ `Average LOS` + Cluster, data = drg_data)
+summary(fit)
+
+
+library(broom)
+fitted_result <- fit %>% augment() %>% 
+  mutate(Class = ifelse(.resid >= 0, "DRGs with Above-Fitted-Value Revenue", "DRGs with Below-Fitted-Value Revenue"))
+
+drg_data$Class <- fitted_result$Class
+
+
+treatment_opportunities_drg <-  output_list_includeMaster %>% 
+  filter(Threshold_InGroup != 0 & Threshold_Among != 0 ) %>% 
+  group_by(Threshold_InGroup, Threshold_Among, Region, DRG, ClusterId) %>% 
+  summarise(TotalProposedVolume = sum(ProposedVolume),
+            TotalDemand = sum(Discharge)) %>% 
+  mutate(TreatmentOpportunity = TotalProposedVolume/TotalDemand) %>% 
+  select(Threshold_InGroup, Threshold_Among, Region, DRG, ClusterId, TreatmentOpportunity, TotalDemand)%>%
+  filter(TotalDemand > 0 ) %>% 
+  left_join(drg_data %>% select(DRGCode, Class), by = c("DRG"="DRGCode")) %>% 
+  ungroup()
+
+
+
+hchart(demand_portfolio_class_above, "heatmap", 
+       hcaes(x = ClusterId, y = Region, value = round(ContributionbyClass,3))) %>%
+  hc_title(text = "Demand Contribution of DRGs with Below-Fitted-Value Revenue",
+           style = list(fontWeight = "bold",fontFamily = "Arial")) %>%
+  hc_xAxis(title = list(text = "Cluster")) %>%
+  hc_yAxis(title = list(text = "Region")) %>% 
+  hc_colorAxis(stops = color_stops(n = 1000, colors = adjusted_palette)) %>% 
+  hc_legend(title = list(text = "Contribution to Cluster Demand (%)")) %>% 
+  hc_tooltip(
+    headerFormat = "",
+    pointFormat = "Contribution: {point.value:.3f}%"
+  )
+
+
+
+
+  
+```
+## Treatment Opportunity Analysis
+```{r, echo = F, warning=FALSE, message=FALSE,out.width="100%"}
+avg_treatment_opportunities_cluster_class <-  treatment_opportunities_drg %>% 
+  group_by(Threshold_InGroup, ClusterId, Class) %>%
+  summarise(AvgTreatmentOpportunity = mean(TreatmentOpportunity)) %>% 
+  ungroup() %>% 
+  mutate(Threshold_InGroup = as.factor(Threshold_InGroup))
+
+a <- ggplot(
+  avg_treatment_opportunities_cluster_class %>% 
+    rename(`Target Inequity Within Clusters` = Threshold_InGroup,
+           `Average Treatment Opportunity` = AvgTreatmentOpportunity),
+  aes(x = `Target Inequity Within Clusters`, y = `Average Treatment Opportunity`, group = Class, color = Class)) +
+  facet_wrap( ~ ClusterId) +
+  geom_line() +
+  geom_point() +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme(text = element_text(family = "Arial")) +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal",
+        axis.text = element_text(size = 8), 
+        axis.title = element_text(size = 9.5),  
+        plot.title = element_text(size = 12,face = "bold")) +  
+  labs(x = "Target Inequity Within Clusters",
+       y = "Average Treatment Opportunity",
+       fill = "Average Treatment Opportunity",
+       title = "Average Treatment Opportunity by DRG Class") +  
+  guides(color = guide_legend(title = "", override.aes = list(shape = 16)))  +
+  scale_color_manual(values = c("#0474ed", "#a2b458"))
+
+
+  a %>%  ggplotly(tooltip=c("x", "y", "group")) %>% 
+     layout(
+    legend = list(
+      orientation = "h",
+      x = 0.1,
+      y = -0.1,
+      traceorder = ""
+    ),
+    margin = list(
+      l = 50,
+      r = 50,
+      t = 70,
+      b = 80
+    )
+  )
+  
+```
+
+
+

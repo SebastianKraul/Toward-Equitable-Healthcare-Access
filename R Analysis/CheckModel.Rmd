@@ -1,0 +1,90 @@
+---
+title: "Check Constraint"
+output: html
+---
+
+```{r setup, include=FALSE}
+options(scipen=999)
+options(digits=3)
+options(knitr.purl.inline = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+
+```{r, echo = T, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(plotly)
+```
+
+# Load data
+```{r, echo = T, warning=FALSE, message=FALSE}
+output <- read_excel("OptModel/Output/2/output_2-0.5-0.5.xlsx")
+drg_master <- read_excel("OptModel/CleanInput/weight.xlsx")
+discharge <- read_excel("OptModel/CleanInput/2/discharge_2.xlsx")
+beds <- read_excel("OptModel/CleanInput/2/beds_2.xlsx")
+
+output_includeMaster <- output %>% left_join(drg_master %>% select(-DRGName), by = c("DRG"="DRGCode"))
+```
+
+# Beds Constraint
+```{r, echo = T, warning=FALSE, message=FALSE}
+output_beds <- output_includeMaster %>% mutate(BedDays = ProposedVolume*MeanLOS) %>% 
+  group_by(Region) %>% 
+  summarise(OutputBedDays = sum(BedDays)) %>% 
+  ungroup() %>% 
+  left_join(beds %>% rename(InputBedDays = BedDays), by = c("Region" = "Region")) %>% 
+  mutate(Satisfy = ifelse(InputBedDays >= OutputBedDays, "Y", "N"))
+```
+
+
+# Within-Equity Constraint
+```{r, echo = T, warning=FALSE, message=FALSE}
+output_opportunity <- output_includeMaster %>% select(Region,DRG, ClusterId, ProposedVolume) %>% 
+  left_join(discharge, by = c("DRG"="DRGCode", "Region"="Region")) %>% 
+  mutate(Opportunity = ProposedVolume/Discharge) %>% 
+  select(Region, DRG, ClusterId, Opportunity)
+
+
+output_opportunity_pairs_DRG <- output_opportunity %>% mutate(Dummy = 1) %>% 
+  full_join(output_opportunity %>% mutate(Dummy = 1) %>% 
+              rename(SecondDRG = DRG,
+                     SecondOpportunity = Opportunity), by=c("Region", "Dummy", "ClusterId")) %>% 
+  mutate(Gap = Opportunity - SecondOpportunity) %>% 
+  select(-Dummy)
+
+```
+
+# Among-Equity Constraint
+```{r, echo = T, warning=FALSE, message=FALSE}
+output_opportunity <- output_includeMaster %>% select(Region,DRG, ClusterId, ProposedVolume) %>% 
+  left_join(discharge, by = c("DRG"="DRGCode", "Region"="Region")) %>% 
+  group_by(Region, ClusterId) %>% 
+  summarise(ProposedVolume = sum(ProposedVolume),
+            Discharge = sum(Discharge)) %>% 
+  ungroup() %>% 
+  mutate(Opportunity = ProposedVolume/Discharge) %>% 
+  select(Region, ClusterId, Opportunity)
+
+
+output_opportunity_pairs_Cluster <- output_opportunity %>% mutate(Dummy = 1) %>% 
+  full_join(output_opportunity %>% mutate(Dummy = 1) %>% 
+              rename(SecondCluster = ClusterId,
+                     SecondOpportunity = Opportunity), by=c("Region", "Dummy")) %>% 
+  mutate(Gap = Opportunity - SecondOpportunity) %>% 
+  select(-Dummy)
+
+```
+
+# Discharge Constraint
+```{r, echo = T, warning=FALSE, message=FALSE}
+discharge_constraint <- output_includeMaster %>% select(Region,DRG, ProposedVolume) %>% 
+  left_join(discharge, by = c("DRG"="DRGCode", "Region"="Region")) %>% 
+  mutate(Satisfy = ifelse(ProposedVolume <= Discharge, "Y","N")) %>% 
+  group_by(Region, Satisfy) %>% 
+  summarise(Freq = n()) %>% 
+  ungroup()
+
+```

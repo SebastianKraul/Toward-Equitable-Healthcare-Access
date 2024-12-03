@@ -1,0 +1,196 @@
+---
+title: "Cleaning Input Data"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+options(scipen=999)
+options(digits=3)
+options(knitr.purl.inline = TRUE)
+
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+
+```{r, echo = T, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(plotly)
+library(factoextra)
+library(cluster)
+```
+
+# Clean Weight Data
+
+```{r, echo = T, warning=FALSE, message=FALSE}
+raw_weight <- read_excel("Data/RawData/Weight_Data.xlsx")
+
+str(raw_weight)
+
+clean_weight <- raw_weight %>% mutate(Weight = as.numeric(Weight)) %>% mutate(Revenue = Weight*5000) %>%
+  filter(!is.na(Revenue))
+
+LOS <- clean_weight %>% select(Revenue)
+
+
+silhouette_pam <- fviz_nbclust(LOS, pam, method = "silhouette")
+silhouette_pam_data <- silhouette_pam$data %>%
+  mutate(Method = "PAM") %>%
+  mutate(`Avg. Silhouette Width` = y) %>%
+  select(-y)
+
+silhouette_kmeans <- fviz_nbclust(LOS, kmeans, method = "silhouette")
+silhouette_kmeans_data <- silhouette_kmeans$data %>%
+  mutate(Method = "Kmeans") %>%
+  mutate(`Avg. Silhouette Width` = y) %>%
+  select(-y)
+
+silhouette_outcome <- bind_rows(silhouette_pam_data, silhouette_kmeans_data)
+
+comparison_silhouette <- ggplot(silhouette_outcome, aes(clusters, `Avg. Silhouette Width`, group = Method, color = Method)) +
+    geom_line() +
+    xlab("Number of clusters") +
+    ylab("Avg. Silhouette Width")+
+      scale_y_continuous(labels = scales::number_format(accuracy = 0.001),
+                         limits = c(-1, 1))+
+  ggtitle("Silhouette Analysis")
+
+
+wss_pam <- fviz_nbclust(LOS, pam, method = "wss")
+wss_pam_data <- wss_pam$data %>%
+  mutate(Method = "PAM") %>%
+  mutate(`Within Sum of Squares` = y) %>%
+  select(-y)
+
+wss_kmeans <- fviz_nbclust(LOS, kmeans, method = "wss")
+wss_kmeans_data <- wss_kmeans$data %>%
+  mutate(Method = "Kmeans") %>%
+  mutate(`Within Sum of Squares` = y) %>%
+  select(-y)
+
+wss_outcome <- bind_rows(wss_pam_data, wss_kmeans_data)
+
+comparison_wss <- ggplot(wss_outcome, aes(clusters, `Within Sum of Squares`, group = Method, color = Method)) +
+    geom_line() +
+    xlab("Within Sum of Squares")+
+      scale_y_continuous(labels = scales::number_format(accuracy = 0.001)) +
+  ggtitle("Elbow Analysis")
+
+# fviz_nbclust(LOS, kmeans, nstart = 500,  method = "gap_stat", nboot = 100)+
+#   labs(subtitle = "Gap statistic method")
+
+clustered_LOS <- kmeans(LOS, centers = 6)
+
+clean_weight$ClusterId <- factor(clustered_LOS$cluster)
+clean_weight <- clean_weight %>%   
+  mutate(ClusterId = case_when(ClusterId == "6" ~ "2",
+                               ClusterId == "2" ~ "3",
+                               ClusterId == "5" ~ "4",
+                               ClusterId == "3" ~ "5",
+                               ClusterId == "4" ~ "6",
+                               TRUE ~ ClusterId)
+  )
+
+visualize_cluster <- ggplot(clean_weight, aes(MeanLOS, Revenue, color = ClusterId)) +
+    geom_point(alpha = 0.5)+
+  ggtitle("DRGs Clustering Based on Revenue")
+
+
+
+write_xlsx(clean_weight, path = "OptModel/CleanInput/weight.xlsx")
+```
+# Discharge Data
+
+```{r, echo = T, warning=FALSE, message=FALSE}
+raw_discharge <- read_excel("Data/RawData/Discharge_Data.xlsx")
+clean_weight <- read_excel("OptModel/CleanInput/weight.xlsx")
+
+
+list_drg <- clean_weight %>% distinct(DRGCode) %>% dplyr::mutate(dummy = 1)
+
+check_drg <- raw_discharge %>% group_by(DRGCode) %>% summarise(count = n()) %>% left_join(list_drg) #ok
+
+list_area <- raw_discharge %>%
+  filter(Area != "National") %>% 
+  distinct(Area) %>% 
+  mutate(dummy = 1)
+
+for (i in 1:length(list_area$Area)){
+  inscope <- list_area$Area[1:i]
+  full_drg_area <- list_drg %>% full_join(list_area) %>% select(-dummy) %>% filter(Area %in% inscope)
+  clean_discharge <-
+    full_drg_area %>% 
+    left_join(raw_discharge %>% 
+                filter(Area %in% inscope) %>% 
+                select(DRGCode, Area, Total)) %>%
+    mutate(Total = ifelse(is.na(Total), 0, Total)) %>%
+    rename(Discharge = Total,
+           Region = Area) %>% 
+    select(Region, DRGCode, Discharge)
+  dir.create(file.path("OptModel/CleanInput/",i))
+  path <- paste0("OptModel/CleanInput/", i)
+  write_xlsx(clean_discharge, file.path(path, paste0("discharge_",i,".xlsx")))
+}
+```
+
+
+# Discharge by Cluster Data
+
+```{r, echo = T, warning=FALSE, message=FALSE}
+raw_discharge <- read_excel("Data/RawData/Discharge_Data.xlsx")
+clean_weight <- read_excel("OptModel/CleanInput/weight.xlsx")
+
+
+list_drg <- clean_weight %>% distinct(DRGCode) %>% dplyr::mutate(dummy = 1)
+
+check_drg <- raw_discharge %>% group_by(DRGCode) %>% summarise(count = n()) %>% left_join(list_drg) #ok
+
+list_area <- raw_discharge %>%
+  filter(Area != "National") %>% 
+  distinct(Area) %>% 
+  mutate(dummy = 1)
+
+for (i in 1:length(list_area$Area)){
+  inscope <- list_area$Area[1:i]
+  full_drg_area <- list_drg %>% full_join(list_area) %>% select(-dummy) %>% filter(Area %in% inscope)
+  clean_discharge <-
+    full_drg_area %>% 
+    left_join(raw_discharge %>% 
+                filter(Area %in% inscope) %>% 
+                select(DRGCode, Area, Total)) %>%
+    mutate(Total = ifelse(is.na(Total), 0, Total)) %>%
+    rename(Discharge = Total,
+           Region = Area) %>% 
+    left_join(clean_weight %>% select(DRGCode, ClusterId)) %>% 
+    group_by(Region, ClusterId) %>% 
+    summarise(Discharge = sum(Discharge)) %>% 
+    select(Region, ClusterId, Discharge)
+  
+  dir.create(file.path("OptModel/CleanInput/",i))
+  path <- paste0("OptModel/CleanInput/", i)
+  write_xlsx(clean_discharge, file.path(path, paste0("dischargebycluster_",i,".xlsx")))
+}
+```
+
+
+# Beds Data
+```{r, echo = T, warning=FALSE, message=FALSE}
+
+for (i in 1:length(list_area$Area)){
+  inscope <- list_area$Area[1:i]
+  discharge_path <- paste0("OptModel/CleanInput/", i, "/discharge_",i,".xlsx")
+  clean_discharge <- read_excel(discharge_path)
+  hospital_beds <- clean_discharge %>% 
+    left_join(clean_weight %>% 
+                select(DRGCode, MeanLOS)) %>%
+  mutate(BedDays = Discharge * MeanLOS * 0.8) %>%
+  group_by(Region) %>%
+  summarise(BedDays = sum(BedDays)) %>%
+  ungroup()
+  path <- paste0("OptModel/CleanInput/", i)
+  write_xlsx(hospital_beds, file.path(path, paste0("/beds_",i,".xlsx")))
+}
+```
+
+
