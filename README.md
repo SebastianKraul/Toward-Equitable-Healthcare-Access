@@ -21,7 +21,7 @@ is required**. It prints the clustering summary, the trade-off numbers, manuscri
 
 ```
 .
-├── README.md, LICENSE, DATA_SOURCES.md
+├── README.md, LICENSE
 ├── requirements.txt, environment.yml
 ├── data/
 │   ├── inputs/
@@ -72,12 +72,3 @@ python optimization.py --sweep                                       # full avai
 
 A license-free open solver (HiGHS) can be substituted in `optimization.py` for users
 without Gurobi.
-
-## Reproduced results (sanity checks)
-
-- Six clusters; the two lowest-revenue clusters hold **76.6%** of DRGs.
-- Reaching inequity index 0.1 lowers total revenue by **≈5–6%** while raising admissions by
-  **4.8–8.2%** (mean ≈6.6%).
-- Table 2 reproduces to the digit (e.g., Alabama 94,028 patients / \$938.093 M).
-
-See `DATA_SOURCES.md` for data provenance and licensing.
